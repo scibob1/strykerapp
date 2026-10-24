@@ -86,9 +86,29 @@ public final class QmpClient {
         return execute("device_del", jo("id", id)) != null;
     }
 
+    /**
+     * Runs one HMP command through QMP and returns what the monitor printed, trimmed.
+     * An empty string means the command printed nothing (which is what a successful
+     * hostfwd_add does); any text is an error message. null means QMP gave no reply.
+     */
+    public synchronized String humanCommand(String commandLine) {
+        JSONObject ret = execute("human-monitor-command", jo("command-line", commandLine));
+        if (ret == null) return null;
+        Object value = ret.opt("return");
+        return value == null ? "" : String.valueOf(value).trim();
+    }
+
+    /** Adds a user-net port forward and returns the monitor's reply: "" = ok, text = the error. */
+    public synchronized String hostfwdAddReply(String rule) {
+        return humanCommand("hostfwd_add " + rule);
+    }
+
     public synchronized boolean hostfwdAdd(String rule) {
-        return execute("human-monitor-command",
-                jo("command-line", "hostfwd_add " + rule)) != null;
+        String reply = hostfwdAddReply(rule);
+        if (reply != null && !reply.isEmpty()) {
+            StrykerLog.w(TAG, "hostfwd_add " + rule + " refused: " + reply);
+        }
+        return reply != null && reply.isEmpty();
     }
 
     public synchronized boolean hostfwdRemove(String rule) {

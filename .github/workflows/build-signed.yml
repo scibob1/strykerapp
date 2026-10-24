@@ -1,0 +1,86 @@
+name: Build signed release APK
+
+# Signs with the keystore stored in this repository's Actions secrets.
+# Required secrets (Settings > Secrets and variables > Actions):
+#   KEYSTORE_BASE64    the .jks / .keystore file, base64-encoded (single line)
+#   KEYSTORE_PASSWORD  keystore password
+#   KEY_ALIAS          key alias
+#   KEY_PASSWORD       key password
+# If your secrets are named differently, change only the four names in the
+# "Build signed release APK" step's env block below.
+
+on:
+  push:
+    branches: [ 'fix/**' ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Install SDK build-tools, NDK and CMake
+        run: |
+          SDKMANAGER="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          yes | "$SDKMANAGER" "platforms;android-33" "build-tools;34.0.0" "ndk;25.1.8937393" "cmake;3.22.1"
+
+      - name: Check signing secrets are present
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          missing=0
+          for v in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!v}" ]; then echo "::error::secret $v is empty or not defined"; missing=1; fi
+          done
+          exit $missing
+
+      - name: Decode keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/stryker-release.jks"
+          test -s "$RUNNER_TEMP/stryker-release.jks"
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build signed release APK
+        env:
+          STRYKER_RELEASE_STORE_FILE: ${{ runner.temp }}/stryker-release.jks
+          STRYKER_RELEASE_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          STRYKER_RELEASE_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          STRYKER_RELEASE_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew :app:assembleRelease --stacktrace
+
+      - name: Verify signature
+        run: |
+          APKSIGNER="$(ls ${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/*/apksigner | sort -V | tail -n 1)"
+          APK="$(ls app/build/outputs/apk/release/*.apk | head -n 1)"
+          echo "APK: $APK"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/stryker-release.jks"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: stryker-signed-${{ github.run_number }}
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14

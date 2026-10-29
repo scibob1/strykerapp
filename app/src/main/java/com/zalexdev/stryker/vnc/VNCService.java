@@ -17,6 +17,7 @@ import com.zalexdev.stryker.MainActivity;
 import com.zalexdev.stryker.R;
 import com.zalexdev.stryker.engine.GuestEngine;
 import com.zalexdev.stryker.engine.GuestSsh;
+import com.zalexdev.stryker.engine.KeepAlive;
 import com.zalexdev.stryker.engine.QmpClient;
 import com.zalexdev.stryker.engine.RootlessEngine;
 import com.zalexdev.stryker.utils.Core;
@@ -43,6 +44,11 @@ public class VNCService extends Service {
     private static final String LOOPBACK = "127.0.0.1";
     private static final String NETDEV_ID = "net0";
 
+    /** Set while the user wants VNC running, so a restart after the process was killed resumes it. */
+    private static final String PREF_WANTED = "vnc_wanted";
+    private static final String PREF_LAST_RESOLUTION = "vnc_last_resolution";
+    private static final String PREF_LAST_PORT = "vnc_last_port";
+
     private Timer timer = new Timer();
     private String port = "";
     private Process vnc = null;
@@ -58,7 +64,18 @@ public class VNCService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        String action = intent.getAction();
+        String action = intent == null ? null : intent.getAction();
+        String reqPort = null;
+        String reqResolution = null;
+        if (intent != null) {
+            reqPort = intent.getStringExtra(EXTRA_PORT);
+            reqResolution = intent.getStringExtra(EXTRA_RESOLUTION);
+        } else if (core.getBoolean(PREF_WANTED)) {
+            action = ACTION_START;
+            reqPort = core.getString(PREF_LAST_PORT);
+            reqResolution = core.getString(PREF_LAST_RESOLUTION);
+            if (reqPort == null || reqPort.isEmpty()) reqPort = "5901";
+        }
 
         createNotificationChannel();
         Intent notificationPendingIntent = new Intent(this, MainActivity.class);
@@ -78,45 +95,52 @@ public class VNCService extends Service {
         } else {
             startForeground(33, notification.build());
         }
-        if (action != null) {
-            if (action.equals(ACTION_START)) {
-                stopped = false;
-                port = intent.getStringExtra(EXTRA_PORT);
-                final String param1 = intent.getStringExtra(EXTRA_RESOLUTION);
-                final String param2 = intent.getStringExtra(EXTRA_PORT);
-                new Thread(() -> {
-                    if (!isVNCStarted()) startVNC(param1, param2);
-                    else ensureForward(parsePort(param2), true);
-                    watchUntilReachable(parsePort(param2));
-                }, "stryker-vnc-start").start();
+        if (action == null) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        if (action.equals(ACTION_START)) {
+            if (reqResolution == null || reqResolution.isEmpty()) {
+                stopSelf();
+                return START_NOT_STICKY;
+            }
+            stopped = false;
+            port = reqPort;
+            core.putBoolean(PREF_WANTED, true);
+            KeepAlive.acquire(getApplicationContext(), "vnc");
+            KeepAlive.askOnce(core, this);
+            final String param1 = reqResolution;
+            final String param2 = reqPort;
+            new Thread(() -> {
+                if (!isVNCStarted()) startVNC(param1, param2);
+                else ensureForward(parsePort(param2), true);
+                watchUntilReachable(parsePort(param2));
+            }, "stryker-vnc-start").start();
+            timer.cancel();
+            timer = new Timer();
+            timer.scheduleAtFixedRate(new TimerTask() {
+                @Override
+                public void run() {
+                    checkVNC();
+                }
+            }, 0, 10000);
+            return START_STICKY;
+        } else if (action.equals(ACTION_STOP)) {
+            core.putBoolean(PREF_WANTED, false);
+            new Thread(() -> {
                 try {
-                    Thread.sleep(5);
-                } catch (InterruptedException e) {
+                    stopVNC();
+                } catch (IOException e) {
                     e.printStackTrace();
                 }
-                timer.cancel();
-                timer = new Timer();
-                timer.scheduleAtFixedRate(new TimerTask() {
-                    @Override
-                    public void run() {
-                        checkVNC();
-                    }
-                }, 0, 10000);
-            } else if (action.equals(ACTION_STOP)) {
-                new Thread(() -> {
-                    try {
-                        stopVNC();
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                }).start();
-            }
+            }).start();
         }
         return START_NOT_STICKY;
     }
 
     @Override
     public void onDestroy() {
+        KeepAlive.release("vnc");
         super.onDestroy();
     }
 
@@ -298,6 +322,7 @@ public class VNCService extends Service {
 
     public void stopVNC() throws IOException {
         stopped = true;
+        core.putBoolean(PREF_WANTED, false);
         if (vnc != null) {
             vnc.destroy();
         }
@@ -313,6 +338,7 @@ public class VNCService extends Service {
         closePortForward(port);
 
         timer.cancel();
+        KeepAlive.release("vnc");
         stopForeground(false);
         stopSelf();
     }
@@ -328,6 +354,8 @@ public class VNCService extends Service {
     }
 
     public void checkVNC() {
+        if (stopped) return;
+        KeepAlive.acquire(getApplicationContext(), "vnc");
         if (isVNCStarted()) {
             int p = parsePort(port);
             if (p > 0 && core.isRootless() && !loopbackPortHeld(p)) ensureForward(p, false);

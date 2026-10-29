@@ -46,6 +46,7 @@ public class RootlessService extends Service {
         } else {
             startForeground(NOTIF_ID, buildNotification("Booting Linux VM…"));
         }
+        KeepAlive.acquire(getApplicationContext(), "vm");
     }
 
     @Override
@@ -59,6 +60,7 @@ public class RootlessService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        KeepAlive.acquire(getApplicationContext(), "vm");
         try { VmStatsCollector.get(getApplicationContext()).start(); } catch (Throwable ignored) {}
         try { UsbWatcher.start(getApplicationContext()); } catch (Throwable ignored) {}
         new Thread(() -> {
@@ -82,6 +84,7 @@ public class RootlessService extends Service {
 
     @Override
     public void onDestroy() {
+        KeepAlive.release("vm");
         try { UsbWatcher.stop(); } catch (Throwable ignored) {}
         try {
             VmStatsCollector c = VmStatsCollector.peek();

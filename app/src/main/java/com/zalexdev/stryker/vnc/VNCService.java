@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.util.Base64;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
@@ -23,6 +24,7 @@ import com.zalexdev.stryker.engine.RootlessEngine;
 import com.zalexdev.stryker.utils.Core;
 import com.zalexdev.stryker.utils.Utils;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetAddress;
@@ -112,8 +114,12 @@ public class VNCService extends Service {
             final String param1 = reqResolution;
             final String param2 = reqPort;
             new Thread(() -> {
-                if (!isVNCStarted()) startVNC(param1, param2);
-                else ensureForward(parsePort(param2), true);
+                if (!isVNCStarted()) {
+                    if (!ensureHelpers()) return;
+                    startVNC(param1, param2);
+                } else {
+                    ensureForward(parsePort(param2), true);
+                }
                 watchUntilReachable(parsePort(param2));
             }, "stryker-vnc-start").start();
             timer.cancel();
@@ -161,6 +167,100 @@ public class VNCService extends Service {
             NotificationManager manager = getSystemService(NotificationManager.class);
             manager.createNotificationChannel(serviceChannel);
         }
+    }
+
+    /**
+     * The VNC tab treats "x11vnc is installed" as "VNC is installed". An install that was
+     * interrupted after apt finished but before the helper scripts were written (for example the
+     * app being killed while it was in the background) leaves x11vnc behind without
+     * /usr/local/bin/vncserver-start. Starting then "worked" in the UI while the guest only
+     * logged "nohup: failed to run command 'vncserver-start': No such file or directory".
+     *
+     * This checks what a start needs, rewrites the two helper scripts from the app if they are the
+     * only thing missing, and otherwise stops with a message that says what is missing.
+     */
+    private boolean ensureHelpers() {
+        ArrayList<String> missing = missingInGuest();
+        if (missing == null) {
+            abortStart("the guest did not answer - is the VM running?");
+            return false;
+        }
+        if (missing.contains("vncserver-start") || missing.contains("vncserver-stop")) {
+            core.logger.writeLine("VNC helper scripts are missing in the guest (the VNC install did "
+                    + "not finish) - writing them from the app", 1);
+            boolean ok = writeHelper("vncserver-start") & writeHelper("vncserver-stop");
+            core.customChrootCommand("[ -s /root/.vnc/passwd ] || { mkdir -p /root/.vnc && "
+                    + "x11vnc -storepasswd stryker /root/.vnc/passwd; }", true);
+            if (!ok) {
+                abortStart("could not write /usr/local/bin/vncserver-start into the guest");
+                return false;
+            }
+            missing = missingInGuest();
+            if (missing == null) {
+                abortStart("the guest did not answer after writing the helper scripts");
+                return false;
+            }
+        }
+        if (!missing.isEmpty()) {
+            abortStart("the VNC install in the guest is incomplete, missing: " + missing
+                    + ". Tap Uninstall and then Install again, and keep Stryker in the foreground"
+                    + " until it says the install is complete.");
+            return false;
+        }
+        return true;
+    }
+
+    /** Names of what a VNC start needs and the guest lacks; null when the guest gave no answer. */
+    private ArrayList<String> missingInGuest() {
+        ArrayList<String> out = core.customChrootCommand(
+                "for c in vncserver-start vncserver-stop Xvfb x11vnc xfce4-session dbus-run-session xset; "
+                        + "do command -v $c >/dev/null 2>&1 || echo MISSING:$c; done; echo CHECKED", true);
+        boolean checked = false;
+        ArrayList<String> missing = new ArrayList<>();
+        for (String l : out) {
+            if (l == null) continue;
+            String t = l.trim();
+            if (t.equals("CHECKED")) checked = true;
+            else if (t.startsWith("MISSING:")) missing.add(t.substring("MISSING:".length()));
+        }
+        return checked ? missing : null;
+    }
+
+    private boolean writeHelper(String name) {
+        try (InputStream in = getAssets().open(name + ".sh")) {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int r;
+            while ((r = in.read(buf)) != -1) bytes.write(buf, 0, r);
+            String b64 = Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP);
+            String dest = "/usr/local/bin/" + name;
+            ArrayList<String> out = core.customChrootCommand("mkdir -p /usr/local/bin && printf %s '"
+                    + b64 + "' | base64 -d > " + dest + " && chmod 0755 " + dest
+                    + " && echo HELPER_OK", true);
+            for (String l : out) {
+                if (l != null && l.trim().equals("HELPER_OK")) return true;
+            }
+        } catch (IOException e) {
+            core.logger.writeLine("VNC helper " + name + " is not bundled in the app: "
+                    + e.getMessage(), 3);
+        }
+        return false;
+    }
+
+    /** Ends a start that cannot work, and makes the VNC tab show "stopped" again. */
+    private void abortStart(String reason) {
+        core.logger.writeLine("VNC could not be started: " + reason, 3);
+        stopped = true;
+        core.putBoolean(PREF_WANTED, false);
+        timer.cancel();
+        Intent intent = new Intent();
+        intent.setAction(ACTION_STOP);
+        intent.addCategory(Intent.CATEGORY_DEFAULT);
+        intent.setPackage(getPackageName());
+        sendBroadcast(intent);
+        KeepAlive.release("vnc");
+        stopForeground(true);
+        stopSelf();
     }
 
     public void startVNC(String resolution, String port) {
@@ -272,6 +372,7 @@ public class VNCService extends Service {
             ArrayList<String> out = core.customChrootCommand(
                     "ss -ltn 2>/dev/null | grep ':" + p + " ' ; "
                             + "echo '--- x11vnc.log'; tail -n 8 /tmp/x11vnc.log 2>&1; "
+                            + "echo '--- xvfb.log'; tail -n 6 /tmp/xvfb.log 2>&1; "
                             + "echo '--- vncserver-start.log'; tail -n 8 /tmp/vncserver-start.log 2>&1", true);
             for (String l : out) {
                 if (l != null && !l.trim().isEmpty()) sb.append(" | ").append(l.trim());

@@ -176,30 +176,22 @@ public class VNCService extends Service {
      * /usr/local/bin/vncserver-start. Starting then "worked" in the UI while the guest only
      * logged "nohup: failed to run command 'vncserver-start': No such file or directory".
      *
-     * This checks what a start needs, rewrites the two helper scripts from the app if they are the
-     * only thing missing, and otherwise stops with a message that says what is missing.
+     * So the two helper scripts are written from the app's bundled copies on every start (this
+     * also brings guests installed by an older version up to date), then what a start needs is
+     * checked, and a start that cannot work is stopped with a message that says what is missing.
      */
     private boolean ensureHelpers() {
-        ArrayList<String> missing = missingInGuest();
-        if (missing == null) {
-            abortStart("the guest did not answer - is the VM running?");
+        boolean wrote = writeHelper("vncserver-start") & writeHelper("vncserver-stop");
+        if (!wrote) {
+            abortStart("could not write /usr/local/bin/vncserver-start into the guest - is the VM running?");
             return false;
         }
-        if (missing.contains("vncserver-start") || missing.contains("vncserver-stop")) {
-            core.logger.writeLine("VNC helper scripts are missing in the guest (the VNC install did "
-                    + "not finish) - writing them from the app", 1);
-            boolean ok = writeHelper("vncserver-start") & writeHelper("vncserver-stop");
-            core.customChrootCommand("[ -s /root/.vnc/passwd ] || { mkdir -p /root/.vnc && "
-                    + "x11vnc -storepasswd stryker /root/.vnc/passwd; }", true);
-            if (!ok) {
-                abortStart("could not write /usr/local/bin/vncserver-start into the guest");
-                return false;
-            }
-            missing = missingInGuest();
-            if (missing == null) {
-                abortStart("the guest did not answer after writing the helper scripts");
-                return false;
-            }
+        core.customChrootCommand("[ -s /root/.vnc/passwd ] || { mkdir -p /root/.vnc && "
+                + "x11vnc -storepasswd stryker /root/.vnc/passwd; }", true);
+        ArrayList<String> missing = missingInGuest();
+        if (missing == null) {
+            abortStart("the guest did not answer");
+            return false;
         }
         if (!missing.isEmpty()) {
             abortStart("the VNC install in the guest is incomplete, missing: " + missing
@@ -213,7 +205,7 @@ public class VNCService extends Service {
     /** Names of what a VNC start needs and the guest lacks; null when the guest gave no answer. */
     private ArrayList<String> missingInGuest() {
         ArrayList<String> out = core.customChrootCommand(
-                "for c in vncserver-start vncserver-stop Xvfb x11vnc xfce4-session dbus-run-session xset; "
+                "for c in vncserver-start vncserver-stop Xvfb x11vnc xfce4-session dbus-run-session xset xfconf-query; "
                         + "do command -v $c >/dev/null 2>&1 || echo MISSING:$c; done; echo CHECKED", true);
         boolean checked = false;
         ArrayList<String> missing = new ArrayList<>();
@@ -354,6 +346,7 @@ public class VNCService extends Service {
             if (rfbAnswers(p)) {
                 core.logger.writeLine("VNC server answers on " + LOOPBACK + ":" + p
                         + " - connect your VNC app to localhost:" + p, 2);
+                checkDesktop();
                 return;
             }
             if (i % 4 == 3) ensureForward(p, false);
@@ -374,6 +367,46 @@ public class VNCService extends Service {
                             + "echo '--- x11vnc.log'; tail -n 8 /tmp/x11vnc.log 2>&1; "
                             + "echo '--- xvfb.log'; tail -n 6 /tmp/xvfb.log 2>&1; "
                             + "echo '--- vncserver-start.log'; tail -n 8 /tmp/vncserver-start.log 2>&1", true);
+            for (String l : out) {
+                if (l != null && !l.trim().isEmpty()) sb.append(" | ").append(l.trim());
+            }
+        } catch (Throwable ignored) {
+        }
+        core.logger.writeLine(sb.toString(), 3);
+    }
+
+    /**
+     * x11vnc answering only proves the X display is shared; a viewer can still see a bare screen or
+     * an error dialog if the XFCE session did not come up. Wait for the window manager and, if it
+     * never appears, put what the guest knows about it into the log.
+     */
+    private void checkDesktop() {
+        for (int i = 0; i < 25 && !stopped; i++) {
+            try {
+                ArrayList<String> out = core.customChrootCommand(
+                        "pidof xfwm4 >/dev/null 2>&1 && echo DESKTOP_UP", true);
+                for (String l : out) {
+                    if (l != null && l.trim().equals("DESKTOP_UP")) {
+                        core.logger.writeLine("XFCE desktop session is up", 2);
+                        return;
+                    }
+                }
+                Thread.sleep(3000);
+            } catch (InterruptedException e) {
+                return;
+            } catch (Throwable t) {
+                return;
+            }
+        }
+        if (stopped) return;
+        StringBuilder sb = new StringBuilder("The XFCE desktop did not start inside the guest.");
+        try {
+            ArrayList<String> out = core.customChrootCommand(
+                    "echo '--- xfce.log'; tail -n 25 /tmp/xfce.log 2>&1; "
+                            + "echo '--- xfconfd.log'; tail -n 8 /tmp/xfconfd.log 2>&1; "
+                            + "echo '--- processes'; ps -eo pid,comm 2>/dev/null | grep -E 'dbus|xfce|xfconf|xfwm|Xvfb|x11vnc' | head -n 14; "
+                            + "echo '--- disk'; df -h / 2>/dev/null | tail -n 1; "
+                            + "echo '--- memory'; free -m 2>/dev/null | sed -n 2p", true);
             for (String l : out) {
                 if (l != null && !l.trim().isEmpty()) sb.append(" | ").append(l.trim());
             }

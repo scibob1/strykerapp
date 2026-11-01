@@ -69,6 +69,8 @@ mkdir -p $XDG_CONFIG_HOME $XDG_CACHE_HOME $XDG_DATA_HOME
 rm -rf /tmp/.X1-lock /tmp/.X11-unix/X1 /tmp/dbus-* 2>/dev/null
 pkill -9 -f 'Xvfb :1' 2>/dev/null
 pkill -9 -f 'xfce4-session' 2>/dev/null
+pkill -9 -f 'xfce-session.sh' 2>/dev/null
+pkill -9 -f 'dbus-run-session' 2>/dev/null
 pkill -9 -f 'x11vnc.*-rfbport' 2>/dev/null
 pkill -9 xfwm4 xfdesktop xfce4-panel xfconfd xfsettingsd 2>/dev/null
 sleep 1
@@ -85,7 +87,30 @@ sleep 2
 xset -display $DISPLAY s off s noblank 2>/dev/null
 xset -display $DISPLAY -dpms 2>/dev/null
 
-dbus-run-session -- xfce4-session >/tmp/xfce.log 2>&1 &
+# xfce4-session shows "Unable to load a failsafe session ... xfconfd isn't running" when the
+# settings daemon is not answering on the session bus by the time it asks (the emulated CPU
+# can be slow enough for D-Bus activation to lose that race). So start xfconfd ourselves inside
+# the session bus, wait until it answers, and only then start the session. Everything it saw is
+# written to /tmp/xfce.log.
+cat > /tmp/xfce-session.sh <<'EOS'
+#!/bin/bash
+XFCONFD=$(ls /usr/lib/*/xfce4/xfconf/xfconfd /usr/lib/xfce4/xfconf/xfconfd 2>/dev/null | head -n 1)
+echo "[session] bus=$DBUS_SESSION_BUS_ADDRESS xfconfd=${XFCONFD:-not found}"
+echo "[session] XDG_CONFIG_DIRS=$XDG_CONFIG_DIRS"
+ls -l /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml 2>&1
+if [ -n "$XFCONFD" ]; then
+    "$XFCONFD" >/tmp/xfconfd.log 2>&1 &
+fi
+ready=0
+for i in $(seq 1 60); do
+    if xfconf-query -c xfce4-session -l >/dev/null 2>&1; then ready=1; break; fi
+    sleep 1
+done
+echo "[session] xfconf answers: $ready (waited ${i}s)"
+exec xfce4-session
+EOS
+chmod 755 /tmp/xfce-session.sh
+dbus-run-session -- /tmp/xfce-session.sh >/tmp/xfce.log 2>&1 &
 sleep 5
 
 x11vnc -xkb -noxrecord -noxfixes -noxdamage -display $DISPLAY -forever -bg \

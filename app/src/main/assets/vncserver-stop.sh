@@ -1,6 +1,8 @@
 #!/bin/bash
 pkill -9 -f x11vnc
 pkill -9 -f Xvfb
+pkill -9 -f xfce-session.sh
+pkill -9 -f dbus-run-session
 pkill pulse
 for i in $(pidof startxfce4; pidof xfce4-session; pidof xfconfd; pidof xfce4-panel; pidof xfce4-power-manager; pidof xfdesktop; pidof xfwm4); do
     kill $i;

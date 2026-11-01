@@ -342,12 +342,19 @@ public class VNCService extends Service {
     /** After a start: wait until a VNC client could really connect, and say why if it never can. */
     private void watchUntilReachable(int p) {
         if (!core.isRootless() || p <= 0) return;
-        for (int i = 0; i < 45 && !stopped; i++) {
+        // Up to 4.5 minutes: the first start of a guest that lacks XFCE default files first
+        // restores them with apt, and x11vnc only comes up after that.
+        for (int i = 0; i < 90 && !stopped; i++) {
             if (rfbAnswers(p)) {
                 core.logger.writeLine("VNC server answers on " + LOOPBACK + ":" + p
                         + " - connect your VNC app to localhost:" + p, 2);
                 checkDesktop();
                 return;
+            }
+            if (i == 10) {
+                core.logger.writeLine("VNC is not answering yet. The first start of a guest with "
+                        + "missing XFCE default files repairs them through apt, which can take "
+                        + "several minutes - still waiting.", 1);
             }
             if (i % 4 == 3) ensureForward(p, false);
             try {
@@ -366,6 +373,7 @@ public class VNCService extends Service {
                     "ss -ltn 2>/dev/null | grep ':" + p + " ' ; "
                             + "echo '--- x11vnc.log'; tail -n 8 /tmp/x11vnc.log 2>&1; "
                             + "echo '--- xvfb.log'; tail -n 6 /tmp/xvfb.log 2>&1; "
+                            + "echo '--- xfce-repair.log'; tail -n 8 /tmp/xfce-repair.log 2>&1; "
                             + "echo '--- vncserver-start.log'; tail -n 8 /tmp/vncserver-start.log 2>&1", true);
             for (String l : out) {
                 if (l != null && !l.trim().isEmpty()) sb.append(" | ").append(l.trim());
@@ -381,7 +389,7 @@ public class VNCService extends Service {
      * never appears, put what the guest knows about it into the log.
      */
     private void checkDesktop() {
-        for (int i = 0; i < 25 && !stopped; i++) {
+        for (int i = 0; i < 40 && !stopped; i++) {
             try {
                 ArrayList<String> out = core.customChrootCommand(
                         "pidof xfwm4 >/dev/null 2>&1 && echo DESKTOP_UP", true);
@@ -404,6 +412,7 @@ public class VNCService extends Service {
             ArrayList<String> out = core.customChrootCommand(
                     "echo '--- xfce.log'; tail -n 25 /tmp/xfce.log 2>&1; "
                             + "echo '--- xfconfd.log'; tail -n 8 /tmp/xfconfd.log 2>&1; "
+                            + "echo '--- xfce-repair.log'; tail -n 8 /tmp/xfce-repair.log 2>&1; "
                             + "echo '--- processes'; ps -eo pid,comm 2>/dev/null | grep -E 'dbus|xfce|xfconf|xfwm|Xvfb|x11vnc' | head -n 14; "
                             + "echo '--- disk'; df -h / 2>/dev/null | tail -n 1; "
                             + "echo '--- memory'; free -m 2>/dev/null | sed -n 2p", true);

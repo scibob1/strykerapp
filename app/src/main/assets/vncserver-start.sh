@@ -81,10 +81,45 @@ mkdir -p /var/run/dbus
 
 rm -rf /root/.cache/sessions /root/.cache/xfce4 2>/dev/null
 
-# xfce4-session asks xfconf for /general/FailsafeSessionName. That default lives in
-# /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml, which this guest image does not
-# have, so xfce4-session shows "Unable to load a failsafe session" and quits. Provide the stock
-# default when it is missing.
+# ---------------------------------------------------------------------------------------------
+# This guest image is missing XFCE's default configuration files under /etc/xdg (the session's
+# xfce4-session.xml and the applications menu were both absent). They are conffiles of the xfce
+# packages, so dpkg can put back exactly the ones that are missing. Only runs when one of three
+# marker files is missing, so a healthy guest pays nothing. Progress: /tmp/xfce-repair.log
+# ---------------------------------------------------------------------------------------------
+NEED_REPAIR=0
+for f in /etc/xdg/menus/xfce-applications.menu /etc/xdg/xfce4/panel/default.xml /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml; do
+    [ -s "$f" ] || NEED_REPAIR=1
+done
+if [ "$NEED_REPAIR" = 1 ]; then
+    echo "[repair] XFCE default files are missing, restoring them from their packages" > /tmp/xfce-repair.log
+    export DEBIAN_FRONTEND=noninteractive
+    PKGS=""
+    for pkg in $(dpkg-query -W -f='${binary:Package}\n' 2>/dev/null | grep -E 'xfce|garcon|xfwm|xfdesktop|xfconf|thunar'); do
+        for f in $(dpkg-query -W -f='${Conffiles}\n' "$pkg" 2>/dev/null | awk 'NF{print $1}'); do
+            if [ ! -e "$f" ]; then
+                echo "[repair] $pkg lacks $f" >> /tmp/xfce-repair.log
+                PKGS="$PKGS $pkg"
+                break
+            fi
+        done
+    done
+    if [ -n "$PKGS" ] && timeout 90 apt-get update >> /tmp/xfce-repair.log 2>&1; then
+        if timeout 900 apt-get install -y --reinstall --no-install-recommends \
+            -o Dpkg::Options::=--force-confmiss -o Dpkg::Options::=--force-confold \
+            $PKGS >> /tmp/xfce-repair.log 2>&1; then
+            echo "[repair] restored:$PKGS" >> /tmp/xfce-repair.log
+        else
+            echo "[repair] apt-get could not reinstall:$PKGS" >> /tmp/xfce-repair.log
+        fi
+    else
+        echo "[repair] nothing to reinstall, or the package index could not be fetched (no network?)" >> /tmp/xfce-repair.log
+    fi
+fi
+
+# Fallbacks when the packages could not restore them (for example no network).
+# xfce4-session asks xfconf for /general/FailsafeSessionName; without this file it shows
+# "Unable to load a failsafe session" and quits.
 XFSD=/etc/xdg/xfce4/xfconf/xfce-perchannel-xml
 if [ ! -s "$XFSD/xfce4-session.xml" ]; then
     mkdir -p "$XFSD"
@@ -128,6 +163,31 @@ if [ ! -s "$XFSD/xfce4-session.xml" ]; then
 EOX
 fi
 
+# Plain applications menu so the panel's menu opens ("Failed to load the applications menu:
+# File 'menus/xfce-applications.menu' not found"). Lists every installed application by category.
+if [ ! -s /etc/xdg/menus/xfce-applications.menu ]; then
+    mkdir -p /etc/xdg/menus
+    cat > /etc/xdg/menus/xfce-applications.menu <<'EOM'
+<!DOCTYPE Menu PUBLIC "-//freedesktop//DTD Menu 1.0//EN" "http://www.freedesktop.org/standards/menu-spec/1.0/menu.dtd">
+<Menu>
+  <Name>Xfce</Name>
+  <DefaultAppDirs/>
+  <DefaultDirectoryDirs/>
+  <DefaultMergeDirs/>
+  <Menu><Name>Accessories</Name><Include><Category>Utility</Category></Include></Menu>
+  <Menu><Name>Development</Name><Include><Category>Development</Category></Include></Menu>
+  <Menu><Name>Education</Name><Include><Category>Education</Category></Include></Menu>
+  <Menu><Name>Games</Name><Include><Category>Game</Category></Include></Menu>
+  <Menu><Name>Graphics</Name><Include><Category>Graphics</Category></Include></Menu>
+  <Menu><Name>Internet</Name><Include><Category>Network</Category></Include></Menu>
+  <Menu><Name>Multimedia</Name><Include><Category>AudioVideo</Category></Include></Menu>
+  <Menu><Name>Office</Name><Include><Category>Office</Category></Include></Menu>
+  <Menu><Name>Settings</Name><Include><Category>Settings</Category></Include></Menu>
+  <Menu><Name>System</Name><Include><Category>System</Category></Include></Menu>
+</Menu>
+EOM
+fi
+
 /usr/bin/Xvfb $DISPLAY -screen 0 $RESOLUTION -ac +extension GLX +render -noreset 2>/tmp/xvfb.log &
 sleep 2
 
@@ -142,8 +202,7 @@ XFCONFD=$(ls /usr/lib/*/xfce4/xfconf/xfconfd /usr/lib/xfce4/xfconf/xfconfd 2>/de
 echo "[session] bus=$DBUS_SESSION_BUS_ADDRESS xfconfd=${XFCONFD:-not found}"
 echo "[session] XDG_CONFIG_DIRS=$XDG_CONFIG_DIRS"
 ls -l /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/ 2>&1 | head -n 12
-echo "[session] xfce4-session package files:"
-dpkg -L xfce4-session 2>/dev/null | grep -E '/etc/|xfconf|\.xml$' | head -n 8
+ls -l /etc/xdg/menus/ 2>&1 | head -n 6
 if [ -n "$XFCONFD" ]; then
     "$XFCONFD" >/tmp/xfconfd.log 2>&1 &
 fi
@@ -153,7 +212,6 @@ for i in $(seq 1 60); do
     sleep 1
 done
 echo "[session] xfconf answers: $ready (waited ${i}s)"
-xfconf-query -c xfce4-session -p /general/FailsafeSessionName 2>&1
 exec xfce4-session
 EOS
 chmod 755 /tmp/xfce-session.sh

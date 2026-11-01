@@ -2,43 +2,47 @@
 # Stryker app installer for the Linux guest.
 #   stryker-apps            interactive menu
 #   stryker-apps list       show bundles
-#   stryker-apps install archive fonts browser ...
+#   stryker-apps install archive fonts browser-lite ...
 #   stryker-apps register   add "Stryker Apps" to the desktop menu
 
 export DEBIAN_FRONTEND=noninteractive
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-BUNDLES="archive fonts browser editor viewer pdf media screenshot dev office"
-RECOMMENDED="archive fonts browser editor viewer pdf screenshot"
+BUNDLES="archive fonts browser-lite browser-tiny browser editor viewer pdf media screenshot dev office"
+RECOMMENDED="archive fonts browser-lite editor viewer pdf screenshot"
 
 pkgs_for() {
     case "$1" in
-        archive)    echo "xarchiver thunar-archive-plugin unzip zip unrar-free 7zip" ;;
-        fonts)      echo "fonts-noto-cjk fonts-wqy-microhei fonts-noto-color-emoji" ;;
-        browser)    echo "firefox-esr" ;;
-        editor)     echo "mousepad" ;;
-        viewer)     echo "ristretto" ;;
-        pdf)        echo "atril" ;;
-        media)      echo "mpv" ;;
-        screenshot) echo "xfce4-screenshooter xfce4-taskmanager" ;;
-        dev)        echo "git curl wget nano vim python3 python3-pip build-essential htop" ;;
-        office)     echo "libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-gtk3" ;;
-        *)          return 1 ;;
+        archive)      echo "xarchiver thunar-archive-plugin unzip zip unrar-free 7zip" ;;
+        fonts)        echo "fonts-noto-cjk fonts-wqy-microhei fonts-noto-color-emoji" ;;
+        browser-lite) echo "epiphany-browser" ;;
+        browser-tiny) echo "netsurf-gtk" ;;
+        browser)      echo "firefox-esr" ;;
+        editor)       echo "mousepad" ;;
+        viewer)       echo "ristretto" ;;
+        pdf)          echo "atril" ;;
+        media)        echo "mpv" ;;
+        screenshot)   echo "xfce4-screenshooter xfce4-taskmanager" ;;
+        dev)          echo "git curl wget nano vim python3 python3-pip build-essential htop" ;;
+        office)       echo "libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-gtk3" ;;
+        *)            return 1 ;;
     esac
 }
 
 desc_for() {
     case "$1" in
-        archive)    echo "Open and create zip / rar / 7z / tar files (double-click and right-click Extract)" ;;
-        fonts)      echo "Chinese, Japanese, Korean and emoji fonts (fixes square boxes instead of text)" ;;
-        browser)    echo "Firefox web browser" ;;
-        editor)     echo "Mousepad text editor" ;;
-        viewer)     echo "Ristretto image viewer" ;;
-        pdf)        echo "Atril PDF viewer" ;;
-        media)      echo "mpv video and audio player (slow on this emulated CPU)" ;;
-        screenshot) echo "Screenshot tool and task manager" ;;
-        dev)        echo "git, curl, wget, nano, vim, python3 + pip, compiler, htop" ;;
-        office)     echo "LibreOffice Writer / Calc / Impress (large download, slow to start)" ;;
+        archive)      echo "Open and create zip / rar / 7z / tar files (double-click and right-click Extract)" ;;
+        fonts)        echo "Chinese, Japanese, Korean and emoji fonts (fixes square boxes instead of text)" ;;
+        browser-lite) echo "Epiphany (GNOME Web): light browser, handles modern sites - recommended" ;;
+        browser-tiny) echo "NetSurf: tiny and very fast, but only simple pages (little or no JavaScript)" ;;
+        browser)      echo "Firefox: complete but heavy - makes the phone hot on this emulated CPU" ;;
+        editor)       echo "Mousepad text editor" ;;
+        viewer)       echo "Ristretto image viewer" ;;
+        pdf)          echo "Atril PDF viewer" ;;
+        media)        echo "mpv video and audio player (slow on this emulated CPU)" ;;
+        screenshot)   echo "Screenshot tool and task manager" ;;
+        dev)          echo "git, curl, wget, nano, vim, python3 + pip, compiler, htop" ;;
+        office)       echo "LibreOffice Writer / Calc / Impress (large download, slow to start)" ;;
     esac
 }
 
@@ -74,6 +78,10 @@ post_install() {
             fc-cache -f >/dev/null 2>&1
             echo "    Restart running programs to see the new fonts."
             ;;
+        browser-lite)
+            command -v xdg-settings >/dev/null 2>&1 && xdg-settings set default-web-browser org.gnome.Epiphany.desktop 2>/dev/null
+            echo "    Epiphany is now the default browser. Tip: keep few tabs open."
+            ;;
     esac
 }
 
@@ -95,7 +103,7 @@ list_bundles() {
     local b mark
     for b in $BUNDLES; do
         if is_installed "$b"; then mark="[x]"; else mark="[ ]"; fi
-        printf "%s %-11s %s\n" "$mark" "$b" "$(desc_for "$b")"
+        printf "%s %-12s %s\n" "$mark" "$b" "$(desc_for "$b")"
     done
 }
 
@@ -114,7 +122,7 @@ EOD
 }
 
 menu() {
-    local i b ans sel
+    local i b ans sel mark
     while true; do
         echo
         echo "Stryker Apps - install software into this Linux VM (needs internet)"
@@ -122,7 +130,7 @@ menu() {
         i=1
         for b in $BUNDLES; do
             if is_installed "$b"; then mark="[x]"; else mark="[ ]"; fi
-            printf "%2d) %s %-11s %s\n" "$i" "$mark" "$b" "$(desc_for "$b")"
+            printf "%2d) %s %-12s %s\n" "$i" "$mark" "$b" "$(desc_for "$b")"
             i=$((i + 1))
         done
         echo " a) install the recommended set: $RECOMMENDED"

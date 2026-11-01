@@ -60,8 +60,21 @@ export XDG_SESSION_TYPE=x11
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# --- performance: this VM has no GPU and its CPU is emulated -------------------------------
+export GDK_BACKEND=x11
 export LIBGL_ALWAYS_SOFTWARE=1
 export GALLIUM_DRIVER=llvmpipe
+# llvmpipe starts one rasteriser thread per CPU; on an emulated 8-core CPU that costs more than it gains.
+export LP_NUM_THREADS=2
+# Do not look for the accessibility bus (every GTK app otherwise tries, and logs a warning).
+export NO_AT_BRIDGE=1
+# Browsers: skip GPU compositing paths, which only run slowly on llvmpipe.
+export WEBKIT_DISABLE_COMPOSITING_MODE=1
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+# WebKit's own sandbox needs kernel features this VM may lack; the VM itself is the sandbox.
+export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+export MOZ_WEBRENDER=0
 
 mkdir -p $XDG_RUNTIME_DIR && chmod 700 $XDG_RUNTIME_DIR
 mkdir -p $XDG_CONFIG_HOME $XDG_CACHE_HOME $XDG_DATA_HOME
@@ -91,6 +104,7 @@ rm -rf /root/.cache/sessions /root/.cache/xfce4 2>/dev/null
 echo "[repair] checking the desktop packages" > /tmp/xfce-repair.log
 if command -v stryker-doctor >/dev/null 2>&1; then
     stryker-doctor autofix >> /tmp/xfce-repair.log 2>&1
+    stryker-doctor tune >> /tmp/xfce-repair.log 2>&1
 fi
 
 # Fallbacks for when the packages could not provide these (for example no network).
@@ -164,7 +178,7 @@ if [ ! -s /etc/xdg/menus/xfce-applications.menu ]; then
 EOM
 fi
 
-/usr/bin/Xvfb $DISPLAY -screen 0 $RESOLUTION -ac +extension GLX +render -noreset 2>/tmp/xvfb.log &
+/usr/bin/Xvfb $DISPLAY -screen 0 $RESOLUTION -ac +extension GLX +render -noreset -nolisten tcp 2>/tmp/xvfb.log &
 sleep 2
 
 xset -display $DISPLAY s off s noblank 2>/dev/null
@@ -177,8 +191,6 @@ cat > /tmp/xfce-session.sh <<'EOS'
 XFCONFD=$(ls /usr/lib/*/xfce4/xfconf/xfconfd /usr/lib/xfce4/xfconf/xfconfd 2>/dev/null | head -n 1)
 echo "[session] bus=$DBUS_SESSION_BUS_ADDRESS xfconfd=${XFCONFD:-not found}"
 echo "[session] XDG_CONFIG_DIRS=$XDG_CONFIG_DIRS"
-ls -l /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/ 2>&1 | head -n 12
-ls -l /etc/xdg/menus/ 2>&1 | head -n 6
 if [ -n "$XFCONFD" ]; then
     "$XFCONFD" >/tmp/xfconfd.log 2>&1 &
 fi
@@ -188,13 +200,41 @@ for i in $(seq 1 60); do
     sleep 1
 done
 echo "[session] xfconf answers: $ready (waited ${i}s)"
+
+# Once: switch off the window manager's compositing, shadows and animations. Each one costs a lot
+# of CPU on a VM without a GPU and makes every window move redraw the whole screen. Delete
+# /root/.config/stryker-perf-applied to have it applied again; change them in Settings > Window
+# Manager Tweaks if you want them back.
+if [ "$ready" = 1 ] && [ ! -e /root/.config/stryker-perf-applied ]; then
+    xfconf-query -c xfwm4 -p /general/use_compositing -n -t bool -s false
+    xfconf-query -c xfwm4 -p /general/show_dock_shadow -n -t bool -s false
+    xfconf-query -c xfwm4 -p /general/show_frame_shadow -n -t bool -s false
+    xfconf-query -c xfwm4 -p /general/show_popup_shadow -n -t bool -s false
+    xfconf-query -c xfwm4 -p /general/zoom_desktop -n -t bool -s false
+    xfconf-query -c xsettings -p /Gtk/EnableAnimations -n -t bool -s false
+    touch /root/.config/stryker-perf-applied
+    echo "[session] performance settings applied"
+fi
 exec xfce4-session
 EOS
 chmod 755 /tmp/xfce-session.sh
 dbus-run-session -- /tmp/xfce-session.sh >/tmp/xfce.log 2>&1 &
 sleep 5
 
-x11vnc -xkb -noxrecord -noxfixes -noxdamage -display $DISPLAY -forever -bg \
-    -rfbauth /root/.vnc/passwd -users root -rfbport $PORT -noshm 2>/tmp/x11vnc.log
+# x11vnc. The previous flags (-noxdamage -noshm) made it re-read the whole screen on a timer and
+# copy every frame through a socket, which is what made the picture lag and the VM busy even when
+# nothing moved. Now it waits for the X server's change notifications (XDAMAGE) and reads frames
+# through shared memory. If it cannot start that way it falls back to the old, slower flags.
+# Extra x11vnc options can be put, on one line, in /root/.vnc/x11vnc.extra
+EXTRA=""
+[ -s /root/.vnc/x11vnc.extra ] && EXTRA=$(head -n 1 /root/.vnc/x11vnc.extra)
+x11vnc -display $DISPLAY -forever -shared -bg -rfbauth /root/.vnc/passwd -users root -rfbport $PORT \
+    -xkb -noxrecord -noxfixes -xdamage -wait 10 -defer 10 $EXTRA 2>/tmp/x11vnc.log
+sleep 3
+if ! pidof x11vnc >/dev/null 2>&1; then
+    echo "[!] x11vnc did not start with the fast settings - retrying with the safe ones" >> /tmp/x11vnc.log
+    x11vnc -xkb -noxrecord -noxfixes -noxdamage -display $DISPLAY -forever -shared -bg \
+        -rfbauth /root/.vnc/passwd -users root -rfbport $PORT -noshm 2>>/tmp/x11vnc.log
+fi
 echo "[!] VNC server started at: localhost:$PORT"
 echo "[!] If you see a dark screen with an X cursor: cat /tmp/xfce.log"

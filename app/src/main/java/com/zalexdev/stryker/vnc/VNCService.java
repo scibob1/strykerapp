@@ -46,6 +46,10 @@ public class VNCService extends Service {
     private static final String LOOPBACK = "127.0.0.1";
     private static final String NETDEV_ID = "net0";
 
+    /** The periodic check runs every 10 s; a longer gap means the whole process was suspended. */
+    private static final long TICK_MS = 10000L;
+    private static final long SUSPENDED_GAP_MS = 35000L;
+
     /** Set while the user wants VNC running, so a restart after the process was killed resumes it. */
     private static final String PREF_WANTED = "vnc_wanted";
     private static final String PREF_LAST_RESOLUTION = "vnc_last_resolution";
@@ -110,6 +114,7 @@ public class VNCService extends Service {
             port = reqPort;
             core.putBoolean(PREF_WANTED, true);
             KeepAlive.acquire(getApplicationContext(), "vnc");
+            KeepAlive.resetTicks();
             KeepAlive.askOnce(core, this);
             final String param1 = reqResolution;
             final String param2 = reqPort;
@@ -129,7 +134,7 @@ public class VNCService extends Service {
                 public void run() {
                     checkVNC();
                 }
-            }, 0, 10000);
+            }, 0, TICK_MS);
             return START_STICKY;
         } else if (action.equals(ACTION_STOP)) {
             core.putBoolean(PREF_WANTED, false);
@@ -188,6 +193,10 @@ public class VNCService extends Service {
         }
         core.customChrootCommand("[ -s /root/.vnc/passwd ] || { mkdir -p /root/.vnc && "
                 + "x11vnc -storepasswd stryker /root/.vnc/passwd; }", true);
+        // Not needed to start: the menu-driven app installer shown in the desktop's menu.
+        if (writeHelper("stryker-apps")) {
+            core.customChrootCommand("stryker-apps register", true);
+        }
         ArrayList<String> missing = missingInGuest();
         if (missing == null) {
             abortStart("the guest did not answer");
@@ -499,6 +508,13 @@ public class VNCService extends Service {
     public void checkVNC() {
         if (stopped) return;
         KeepAlive.acquire(getApplicationContext(), "vnc");
+        long gap = KeepAlive.tick();
+        if (gap > SUSPENDED_GAP_MS) {
+            core.logger.writeLine("Stryker was suspended by the system for about " + (gap / 1000)
+                    + " s (this check runs every " + (TICK_MS / 1000) + " s). While suspended the VM "
+                    + "and VNC cannot answer. Allow background activity and unrestricted battery "
+                    + "use for Stryker in the system settings, and lock it in the recent-apps screen.", 3);
+        }
         if (isVNCStarted()) {
             int p = parsePort(port);
             if (p > 0 && core.isRootless() && !loopbackPortHeld(p)) ensureForward(p, false);

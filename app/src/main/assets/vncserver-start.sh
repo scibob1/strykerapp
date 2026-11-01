@@ -81,23 +81,69 @@ mkdir -p /var/run/dbus
 
 rm -rf /root/.cache/sessions /root/.cache/xfce4 2>/dev/null
 
+# xfce4-session asks xfconf for /general/FailsafeSessionName. That default lives in
+# /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml, which this guest image does not
+# have, so xfce4-session shows "Unable to load a failsafe session" and quits. Provide the stock
+# default when it is missing.
+XFSD=/etc/xdg/xfce4/xfconf/xfce-perchannel-xml
+if [ ! -s "$XFSD/xfce4-session.xml" ]; then
+    mkdir -p "$XFSD"
+    cat > "$XFSD/xfce4-session.xml" <<'EOX'
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfce4-session" version="1.0">
+  <property name="splash" type="empty">
+    <property name="Engine" type="string" value=""/>
+  </property>
+  <property name="general" type="empty">
+    <property name="FailsafeSessionName" type="string" value="Failsafe"/>
+  </property>
+  <property name="sessions" type="empty">
+    <property name="Failsafe" type="empty">
+      <property name="IsFailsafe" type="bool" value="true"/>
+      <property name="Count" type="int" value="4"/>
+      <property name="Client0_Command" type="array">
+        <value type="string" value="xfwm4"/>
+      </property>
+      <property name="Client0_Priority" type="int" value="15"/>
+      <property name="Client0_PerScreen" type="bool" value="false"/>
+      <property name="Client1_Command" type="array">
+        <value type="string" value="xfsettingsd"/>
+      </property>
+      <property name="Client1_Priority" type="int" value="20"/>
+      <property name="Client1_PerScreen" type="bool" value="false"/>
+      <property name="Client2_Command" type="array">
+        <value type="string" value="xfce4-panel"/>
+      </property>
+      <property name="Client2_Priority" type="int" value="25"/>
+      <property name="Client2_PerScreen" type="bool" value="false"/>
+      <property name="Client3_Command" type="array">
+        <value type="string" value="xfdesktop"/>
+      </property>
+      <property name="Client3_Priority" type="int" value="35"/>
+      <property name="Client3_PerScreen" type="bool" value="false"/>
+    </property>
+  </property>
+</channel>
+EOX
+fi
+
 /usr/bin/Xvfb $DISPLAY -screen 0 $RESOLUTION -ac +extension GLX +render -noreset 2>/tmp/xvfb.log &
 sleep 2
 
 xset -display $DISPLAY s off s noblank 2>/dev/null
 xset -display $DISPLAY -dpms 2>/dev/null
 
-# xfce4-session shows "Unable to load a failsafe session ... xfconfd isn't running" when the
-# settings daemon is not answering on the session bus by the time it asks (the emulated CPU
-# can be slow enough for D-Bus activation to lose that race). So start xfconfd ourselves inside
-# the session bus, wait until it answers, and only then start the session. Everything it saw is
-# written to /tmp/xfce.log.
+# Start xfconfd ourselves inside the session bus, wait until it answers, and only then start the
+# session. Everything it saw is written to /tmp/xfce.log.
 cat > /tmp/xfce-session.sh <<'EOS'
 #!/bin/bash
 XFCONFD=$(ls /usr/lib/*/xfce4/xfconf/xfconfd /usr/lib/xfce4/xfconf/xfconfd 2>/dev/null | head -n 1)
 echo "[session] bus=$DBUS_SESSION_BUS_ADDRESS xfconfd=${XFCONFD:-not found}"
 echo "[session] XDG_CONFIG_DIRS=$XDG_CONFIG_DIRS"
-ls -l /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml 2>&1
+ls -l /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/ 2>&1 | head -n 12
+echo "[session] xfce4-session package files:"
+dpkg -L xfce4-session 2>/dev/null | grep -E '/etc/|xfconf|\.xml$' | head -n 8
 if [ -n "$XFCONFD" ]; then
     "$XFCONFD" >/tmp/xfconfd.log 2>&1 &
 fi
@@ -107,6 +153,7 @@ for i in $(seq 1 60); do
     sleep 1
 done
 echo "[session] xfconf answers: $ready (waited ${i}s)"
+xfconf-query -c xfce4-session -p /general/FailsafeSessionName 2>&1
 exec xfce4-session
 EOS
 chmod 755 /tmp/xfce-session.sh

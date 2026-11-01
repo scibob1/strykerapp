@@ -4,7 +4,8 @@
 #   stryker-doctor report    short health report (also what Stryker writes to its Logs)
 #   stryker-doctor test-gui  start the Settings window for a few seconds and show why it fails
 #   stryker-doctor prepare   write fallback desktop settings that are missing (runs on every start)
-#   stryker-doctor fix       install missing desktop packages (needs internet)
+#   stryker-doctor autofix   finish half-installed packages and install missing desktop parts
+#   stryker-doctor fix       same as autofix, with a closing message
 #   stryker-doctor reset     back up and clear XFCE's per-user settings (then restart VNC)
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -15,6 +16,20 @@ UXML=/root/.config/xfce4/xfconf/xfce-perchannel-xml
 # What the desktop needs to look and behave normally. The VNC installer used
 # --no-install-recommends, so several of these may never have been installed.
 CHECK_PKGS="xfce4-session xfce4-panel xfce4-settings xfdesktop4 xfdesktop4-data xfwm4 xfconf thunar thunar-data xfce4-appfinder libgarcon-common shared-mime-info hicolor-icon-theme adwaita-icon-theme librsvg2-common gvfs desktop-file-utils"
+
+# Packages dpkg unpacked but never configured. A package's configuration files (the panel layout,
+# the session defaults, the applications menu...) only appear when it is configured, so an install
+# that was interrupted - for example while the app was in the background - leaves them missing.
+broken_pkgs() {
+    dpkg -l 2>/dev/null | awk 'NR>5 && $1 ~ /^.[HUFWt]/ {print $2}'
+}
+
+missing_pkgs() {
+    local p
+    for p in $CHECK_PKGS; do
+        dpkg -s "$p" >/dev/null 2>&1 || printf '%s ' "$p"
+    done
+}
 
 session_env() {
     local pid line
@@ -34,14 +49,15 @@ report() {
         if pidof "$p" >/dev/null 2>&1; then up="$up $p=up"; else up="$up $p=DOWN"; fi
     done
     echo "processes:$up"
-    echo "packages not installed: $(for p in $CHECK_PKGS; do dpkg -s "$p" >/dev/null 2>&1 || printf '%s ' "$p"; done)"
+    echo "packages not installed: $(missing_pkgs)"
+    echo "packages half-installed (unpacked, not configured): $(broken_pkgs | tr '\n' ' ')"
     for f in /etc/xdg/menus/xfce-applications.menu /etc/xdg/xfce4/panel/default.xml /usr/share/xfce4/panel/default.xml /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml; do
         if [ -e "$f" ]; then echo "file ok: $f"; else echo "file MISSING: $f"; fi
     done
     echo "user settings: $(ls "$UXML" 2>/dev/null | tr '\n' ' ')"
-    echo "dpkg path-exclude rules: $(grep -rhs '^path-exclude' /etc/dpkg/dpkg.cfg /etc/dpkg/dpkg.cfg.d 2>/dev/null | head -n 6 | tr '\n' ';')"
-    echo "dpkg audit: $(dpkg --audit 2>&1 | head -n 4 | tr '\n' ' ')"
-    echo "repair log: $(tail -n 4 /tmp/xfce-repair.log 2>/dev/null | tr '\n' ' ')"
+    echo "panel config: $(grep -c 'plugin-ids' "$UXML/xfce4-panel.xml" 2>/dev/null) plugin-ids entries, $(wc -c < "$UXML/xfce4-panel.xml" 2>/dev/null) bytes"
+    echo "xfce.log: $(tail -n 6 /tmp/xfce.log 2>/dev/null | tr '\n' ' ')"
+    echo "repair log: $(tail -n 6 /tmp/xfce-repair.log 2>/dev/null | tr '\n' ' ')"
 }
 
 test_gui() {
@@ -57,7 +73,7 @@ prepare() {
     mkdir -p "$UXML"
     # Without any panel layout xfce4-panel shows no bar at all. Use a plain top bar (applications
     # menu, window list, clock, log-out button) when the system has no default and the user's own
-    # file is missing or empty.
+    # file is missing or empty. autofix drops this stand-in again once the real default exists.
     if [ ! -e /etc/xdg/xfce4/panel/default.xml ] && [ ! -e /usr/share/xfce4/panel/default.xml ]; then
         if [ ! -s "$UXML/xfce4-panel.xml" ] || ! grep -q 'plugin-ids' "$UXML/xfce4-panel.xml"; then
             [ -s "$UXML/xfce4-panel.xml" ] && mv "$UXML/xfce4-panel.xml" "$UXML/xfce4-panel.xml.bak"
@@ -113,24 +129,51 @@ EOD
     return 0
 }
 
-fix() {
-    local missing p
-    missing=""
-    for p in $CHECK_PKGS; do dpkg -s "$p" >/dev/null 2>&1 || missing="$missing $p"; done
-    if [ -z "$missing" ]; then
-        echo "All desktop packages are installed."
-        return 0
+autofix() {
+    local broken missing p
+
+    broken=$(broken_pkgs | tr '\n' ' ')
+    if [ -n "$broken" ]; then
+        echo "[fix] finishing half-installed packages: $broken"
+        # --force-confnew: the package's own default files win over the stand-ins written by Stryker.
+        dpkg --force-confnew --configure -a || echo "[fix] dpkg --configure -a reported errors"
+        apt-get install -f -y --no-install-recommends -o Dpkg::Options::=--force-confnew 2>&1 | tail -n 5
+        echo "[fix] still half-installed afterwards: $(broken_pkgs | tr '\n' ' ')"
     fi
-    echo "Installing:$missing"
-    apt-get update || echo "!! apt-get update failed - is the phone online?"
-    if ! apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confmiss $missing; then
-        echo "Retrying one package at a time..."
-        for p in $missing; do
-            apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confmiss "$p" || echo "!! could not install $p"
-        done
+
+    missing=$(missing_pkgs)
+    if [ -n "$missing" ]; then
+        echo "[fix] installing missing packages: $missing"
+        if timeout 90 apt-get update >/dev/null 2>&1; then
+            if ! timeout 900 apt-get install -y --no-install-recommends \
+                -o Dpkg::Options::=--force-confmiss -o Dpkg::Options::=--force-confnew $missing; then
+                for p in $missing; do
+                    timeout 600 apt-get install -y --no-install-recommends \
+                        -o Dpkg::Options::=--force-confmiss -o Dpkg::Options::=--force-confnew "$p" \
+                        || echo "[fix] could not install $p"
+                done
+            fi
+        else
+            echo "[fix] the package index could not be fetched (no network?)"
+        fi
+        echo "[fix] still not installed afterwards: $(missing_pkgs)"
     fi
+
+    # Once the real panel layout exists, drop the small stand-in written by prepare so it is used.
+    if [ -e /etc/xdg/xfce4/panel/default.xml ] && [ -s "$UXML/xfce4-panel.xml" ] \
+        && [ "$(wc -c < "$UXML/xfce4-panel.xml")" -lt 2500 ]; then
+        mv "$UXML/xfce4-panel.xml" "$UXML/xfce4-panel.xml.stryker-bak"
+        echo "[fix] using the system's panel layout instead of the stand-in"
+    fi
+
+    glib-compile-schemas /usr/share/glib-2.0/schemas >/dev/null 2>&1
     gdk-pixbuf-query-loaders --update-cache >/dev/null 2>&1
     update-mime-database /usr/share/mime >/dev/null 2>&1
+    echo "[fix] done"
+}
+
+fix() {
+    autofix
     echo "Finished. Stop and start VNC in Stryker to load everything."
 }
 
@@ -150,7 +193,7 @@ menu() {
         echo
         echo "Stryker Doctor"
         echo " 1) Show a health report"
-        echo " 2) Install missing desktop parts (needs internet)"
+        echo " 2) Repair the desktop (finish half-installed packages, install missing parts; needs internet)"
         echo " 3) Reset desktop settings (keeps a backup)"
         echo " 4) Try the Settings window and show why it fails"
         echo " q) Quit"
@@ -171,7 +214,8 @@ case "${1:-menu}" in
     report)   report ;;
     test-gui) test_gui ;;
     prepare)  prepare ;;
+    autofix)  autofix ;;
     fix)      fix ;;
     reset)    reset_settings ;;
-    *)        echo "usage: stryker-doctor [menu|report|test-gui|prepare|fix|reset]"; exit 1 ;;
+    *)        echo "usage: stryker-doctor [menu|report|test-gui|prepare|autofix|fix|reset]"; exit 1 ;;
 esac

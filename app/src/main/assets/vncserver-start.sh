@@ -82,42 +82,18 @@ mkdir -p /var/run/dbus
 rm -rf /root/.cache/sessions /root/.cache/xfce4 2>/dev/null
 
 # ---------------------------------------------------------------------------------------------
-# This guest image is missing XFCE's default configuration files under /etc/xdg (the session's
-# xfce4-session.xml and the applications menu were both absent). They are conffiles of the xfce
-# packages, so dpkg can put back exactly the ones that are missing. Only runs when one of three
-# marker files is missing, so a healthy guest pays nothing. Progress: /tmp/xfce-repair.log
+# Why the desktop lacked its panel, menus and default settings: the XFCE packages in this guest
+# were unpacked but never configured (the install was interrupted, e.g. while the app was in the
+# background). dpkg only puts a package's configuration files in place when it configures it.
+# stryker-doctor finishes that and installs what is missing. Progress: /tmp/xfce-repair.log
+# Healthy guests pay only a few seconds. Keep Stryker visible while this runs.
 # ---------------------------------------------------------------------------------------------
-NEED_REPAIR=0
-for f in /etc/xdg/menus/xfce-applications.menu /etc/xdg/xfce4/panel/default.xml /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml; do
-    [ -s "$f" ] || NEED_REPAIR=1
-done
-if [ "$NEED_REPAIR" = 1 ]; then
-    echo "[repair] XFCE default files are missing, restoring them from their packages" > /tmp/xfce-repair.log
-    export DEBIAN_FRONTEND=noninteractive
-    PKGS=""
-    for pkg in $(dpkg-query -W -f='${binary:Package}\n' 2>/dev/null | grep -E 'xfce|garcon|xfwm|xfdesktop|xfconf|thunar'); do
-        for f in $(dpkg-query -W -f='${Conffiles}\n' "$pkg" 2>/dev/null | awk 'NF{print $1}'); do
-            if [ ! -e "$f" ]; then
-                echo "[repair] $pkg lacks $f" >> /tmp/xfce-repair.log
-                PKGS="$PKGS $pkg"
-                break
-            fi
-        done
-    done
-    if [ -n "$PKGS" ] && timeout 90 apt-get update >> /tmp/xfce-repair.log 2>&1; then
-        if timeout 900 apt-get install -y --reinstall --no-install-recommends \
-            -o Dpkg::Options::=--force-confmiss -o Dpkg::Options::=--force-confold \
-            $PKGS >> /tmp/xfce-repair.log 2>&1; then
-            echo "[repair] restored:$PKGS" >> /tmp/xfce-repair.log
-        else
-            echo "[repair] apt-get could not reinstall:$PKGS" >> /tmp/xfce-repair.log
-        fi
-    else
-        echo "[repair] nothing to reinstall, or the package index could not be fetched (no network?)" >> /tmp/xfce-repair.log
-    fi
+echo "[repair] checking the desktop packages" > /tmp/xfce-repair.log
+if command -v stryker-doctor >/dev/null 2>&1; then
+    stryker-doctor autofix >> /tmp/xfce-repair.log 2>&1
 fi
 
-# Fallbacks when the packages could not restore them (for example no network).
+# Fallbacks for when the packages could not provide these (for example no network).
 # xfce4-session asks xfconf for /general/FailsafeSessionName; without this file it shows
 # "Unable to load a failsafe session" and quits.
 XFSD=/etc/xdg/xfce4/xfconf/xfce-perchannel-xml

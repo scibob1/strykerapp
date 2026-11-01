@@ -181,7 +181,7 @@ public class VNCService extends Service {
      * /usr/local/bin/vncserver-start. Starting then "worked" in the UI while the guest only
      * logged "nohup: failed to run command 'vncserver-start': No such file or directory".
      *
-     * So the two helper scripts are written from the app's bundled copies on every start (this
+     * So the helper scripts are written from the app's bundled copies on every start (this
      * also brings guests installed by an older version up to date), then what a start needs is
      * checked, and a start that cannot work is stopped with a message that says what is missing.
      */
@@ -193,9 +193,12 @@ public class VNCService extends Service {
         }
         core.customChrootCommand("[ -s /root/.vnc/passwd ] || { mkdir -p /root/.vnc && "
                 + "x11vnc -storepasswd stryker /root/.vnc/passwd; }", true);
-        // Not needed to start: the menu-driven app installer shown in the desktop's menu.
+        // Not needed to start: the app installer and the desktop doctor, with their menu entries.
         if (writeHelper("stryker-apps")) {
             core.customChrootCommand("stryker-apps register", true);
+        }
+        if (writeHelper("stryker-doctor")) {
+            core.customChrootCommand("stryker-doctor prepare", true);
         }
         ArrayList<String> missing = missingInGuest();
         if (missing == null) {
@@ -405,6 +408,7 @@ public class VNCService extends Service {
                 for (String l : out) {
                     if (l != null && l.trim().equals("DESKTOP_UP")) {
                         core.logger.writeLine("XFCE desktop session is up", 2);
+                        logDesktopReport();
                         return;
                     }
                 }
@@ -431,6 +435,28 @@ public class VNCService extends Service {
         } catch (Throwable ignored) {
         }
         core.logger.writeLine(sb.toString(), 3);
+    }
+
+    /**
+     * Once the desktop is up, give the panel and the rest a moment to start, then log a short
+     * health report from the guest (missing packages and files, which desktop parts are running,
+     * and why the Settings window fails if it does). Shown once per start.
+     */
+    private void logDesktopReport() {
+        try {
+            Thread.sleep(25000);
+            if (stopped) return;
+            ArrayList<String> out = core.customChrootCommand(
+                    "stryker-doctor report 2>&1; echo '== settings window test'; "
+                            + "stryker-doctor test-gui 2>&1", true);
+            StringBuilder sb = new StringBuilder("Desktop report");
+            for (String l : out) {
+                if (l != null && !l.trim().isEmpty()) sb.append(" | ").append(l.trim());
+            }
+            core.logger.writeLine(sb.toString(), 1);
+        } catch (InterruptedException ignored) {
+        } catch (Throwable ignored) {
+        }
     }
 
     private static int parsePort(String value) {

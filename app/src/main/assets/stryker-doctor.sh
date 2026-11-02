@@ -1,11 +1,12 @@
 #!/bin/bash
 # stryker-doctor: look for and repair problems with the XFCE desktop in this VM.
-#   stryker-doctor           menu (report / install missing parts / reset settings)
+#   stryker-doctor           menu (report / repair / reset settings)
 #   stryker-doctor report    short health report (also what Stryker writes to its Logs)
 #   stryker-doctor test-gui  start the Settings window for a few seconds and show why it fails
 #   stryker-doctor prepare   write fallback desktop settings that are missing (runs on every start)
 #   stryker-doctor autofix   finish half-installed packages and install missing desktop parts
 #   stryker-doctor fix       same as autofix, with a closing message
+#   stryker-doctor tune      switch off periodic background jobs (once)
 #   stryker-doctor reset     back up and clear XFCE's per-user settings (then restart VNC)
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -51,12 +52,14 @@ report() {
     echo "processes:$up"
     echo "packages not installed: $(missing_pkgs)"
     echo "packages half-installed (unpacked, not configured): $(broken_pkgs | tr '\n' ' ')"
-    for f in /etc/xdg/menus/xfce-applications.menu /etc/xdg/xfce4/panel/default.xml /usr/share/xfce4/panel/default.xml /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml; do
+    for f in /etc/xdg/menus/xfce-applications.menu /etc/xdg/xfce4/panel/default.xml /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml; do
         if [ -e "$f" ]; then echo "file ok: $f"; else echo "file MISSING: $f"; fi
     done
-    echo "user settings: $(ls "$UXML" 2>/dev/null | tr '\n' ' ')"
     echo "panel config: $(grep -c 'plugin-ids' "$UXML/xfce4-panel.xml" 2>/dev/null) plugin-ids entries, $(wc -c < "$UXML/xfce4-panel.xml" 2>/dev/null) bytes"
-    echo "xfce.log: $(tail -n 6 /tmp/xfce.log 2>/dev/null | tr '\n' ' ')"
+    echo "x11vnc: $(pgrep -a x11vnc 2>/dev/null | cut -c1-230)"
+    echo "load: $(cut -d' ' -f1-3 /proc/loadavg), cpus: $(nproc 2>/dev/null)"
+    echo "busiest: $(ps -eo pcpu,comm --sort=-pcpu 2>/dev/null | sed -n '2,7p' | awk '{printf "%s%% %s; ", $1, $2}')"
+    echo "compositing off: $([ -e /root/.config/stryker-perf-applied ] && echo yes || echo no)"
     echo "repair log: $(tail -n 6 /tmp/xfce-repair.log 2>/dev/null | tr '\n' ' ')"
 }
 
@@ -177,11 +180,26 @@ fix() {
     echo "Finished. Stop and start VNC in Stryker to load everything."
 }
 
+# The guest runs systemd timers (daily package-list refresh, man-page index, disk trim...). On an
+# emulated CPU they cause bursts of load, and the package refresh also takes the dpkg lock that
+# stryker-apps and the repair need. Switch them off once; re-enable with systemctl enable --now.
+tune() {
+    [ -e /root/.config/stryker-tuned ] && return 0
+    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+        for t in apt-daily.timer apt-daily-upgrade.timer man-db.timer e2scrub_all.timer fstrim.timer dpkg-db-backup.timer; do
+            systemctl disable --now "$t" >/dev/null 2>&1
+        done
+        echo "[tune] periodic background jobs switched off"
+    fi
+    mkdir -p /root/.config && touch /root/.config/stryker-tuned
+    return 0
+}
+
 reset_settings() {
     local ts d
     ts=$(date +%s)
     mkdir -p /root/stryker-backup
-    for d in /root/.config/xfce4 /root/.config/Thunar /root/.cache/sessions /root/.cache/xfce4 /root/.local/share/xfce4; do
+    for d in /root/.config/xfce4 /root/.config/Thunar /root/.cache/sessions /root/.cache/xfce4 /root/.local/share/xfce4 /root/.config/stryker-perf-applied; do
         [ -e "$d" ] && mv "$d" "/root/stryker-backup/$(basename "$d").$ts" && echo "moved $d"
     done
     echo "Settings reset (old ones are in /root/stryker-backup). Stop and start VNC in Stryker."
@@ -216,6 +234,7 @@ case "${1:-menu}" in
     prepare)  prepare ;;
     autofix)  autofix ;;
     fix)      fix ;;
+    tune)     tune ;;
     reset)    reset_settings ;;
-    *)        echo "usage: stryker-doctor [menu|report|test-gui|prepare|autofix|fix|reset]"; exit 1 ;;
+    *)        echo "usage: stryker-doctor [menu|report|test-gui|prepare|autofix|fix|tune|reset]"; exit 1 ;;
 esac
